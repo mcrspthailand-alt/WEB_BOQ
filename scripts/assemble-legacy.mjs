@@ -5,6 +5,7 @@ import { gunzipSync } from 'node:zlib';
 const publicDir = path.join(process.cwd(), 'public');
 const outputPath = path.join(publicDir, 'legacy-v15.html.gz.b64');
 const partPattern = /^legacy-v15\.part-(\d{2})\.txt$/;
+const maxSearchAttempts = 5000;
 
 const entries = await readdir(publicDir);
 const parts = entries
@@ -35,64 +36,119 @@ for (const [index, chunk] of chunks.entries()) {
   if (!/^[A-Za-z0-9+/]*={0,2}$/.test(chunk)) {
     throw new Error(`Legacy WEB BOQ payload part contains invalid base64 characters: ${parts[index].name}`);
   }
+  if (chunk.length % 4 !== 0) {
+    throw new Error(`Legacy WEB BOQ payload part is not aligned to a base64 boundary: ${parts[index].name}`);
+  }
 }
 
-let encoded = '';
-let html = null;
-let usedPartCount = 0;
-let lastError = null;
-
-for (let index = 0; index < chunks.length; index += 1) {
-  encoded += chunks[index];
-
-  if (encoded.length % 4 !== 0) {
-    console.warn(`prefix 00-${String(index).padStart(2, '0')}: skipped because base64 length is not divisible by 4`);
-    continue;
-  }
-
+function inspectOrder(order) {
+  const encoded = order.map((index) => chunks[index]).join('');
   const compressed = Buffer.from(encoded, 'base64');
 
-  if (index === 0 && (compressed[0] !== 0x1f || compressed[1] !== 0x8b)) {
-    throw new Error('Legacy WEB BOQ payload does not have a valid gzip header');
+  if (compressed[0] !== 0x1f || compressed[1] !== 0x8b) {
+    return { status: 'invalid', reason: 'missing gzip header' };
   }
 
   try {
-    const candidate = gunzipSync(compressed).toString('utf8');
+    const html = gunzipSync(compressed).toString('utf8');
+    const valid =
+      html.startsWith('<!doctype html>') &&
+      html.includes('WEB BOQ • v15') &&
+      html.includes('syncGeneratedBoq');
 
-    if (
-      candidate.startsWith('<!doctype html>') &&
-      candidate.includes('WEB BOQ • v15') &&
-      candidate.includes('syncGeneratedBoq')
-    ) {
-      html = candidate;
-      usedPartCount = index + 1;
-      break;
-    }
-
-    console.warn(
-      `prefix 00-${String(index).padStart(2, '0')}: gzip decoded but required WEB BOQ markers were not all present`,
-    );
+    return valid
+      ? { status: 'complete', html, encoded }
+      : { status: 'invalid', reason: 'gzip completed without required WEB BOQ markers' };
   } catch (error) {
-    lastError = error;
     const code = error && typeof error === 'object' && 'code' in error ? error.code : 'UNKNOWN';
     const message = error instanceof Error ? error.message : String(error);
-    console.warn(`prefix 00-${String(index).padStart(2, '0')}: ${code} ${message}`);
+
+    if (code === 'Z_BUF_ERROR' && /unexpected end/i.test(message)) {
+      return { status: 'incomplete', reason: `${code} ${message}` };
+    }
+
+    return { status: 'invalid', reason: `${code} ${message}` };
   }
 }
 
-if (html === null) {
-  const suffix = lastError instanceof Error ? `: ${lastError.message}` : '';
-  throw new Error(`No complete legacy WEB BOQ gzip payload could be reconstructed from the available parts${suffix}`);
+let attempts = 0;
+const memo = new Set();
+
+function recoverOrder(order, remaining) {
+  attempts += 1;
+  if (attempts > maxSearchAttempts) {
+    throw new Error(`Legacy WEB BOQ part-order recovery exceeded ${maxSearchAttempts} attempts`);
+  }
+
+  const key = order.join(',');
+  if (memo.has(key)) return null;
+  memo.add(key);
+
+  const inspection = inspectOrder(order);
+
+  if (inspection.status === 'complete') {
+    return { order, ...inspection };
+  }
+
+  if (inspection.status === 'invalid' || remaining.length === 0) {
+    return null;
+  }
+
+  for (const candidate of remaining) {
+    const nextOrder = [...order, candidate];
+    const nextInspection = inspectOrder(nextOrder);
+    const label = nextOrder.map((index) => String(index).padStart(2, '0')).join(' → ');
+
+    if (nextInspection.status === 'invalid') {
+      if (order.length === 1) {
+        console.warn(`candidate ${label}: rejected (${nextInspection.reason})`);
+      }
+      continue;
+    }
+
+    console.log(`candidate ${label}: ${nextInspection.status}`);
+
+    if (nextInspection.status === 'complete') {
+      return { order: nextOrder, ...nextInspection };
+    }
+
+    const result = recoverOrder(
+      nextOrder,
+      remaining.filter((index) => index !== candidate),
+    );
+    if (result) return result;
+  }
+
+  return null;
 }
 
-const selectedEncoded = chunks.slice(0, usedPartCount).join('');
-await writeFile(outputPath, `${selectedEncoded}\n`, 'utf8');
-
-if (usedPartCount < parts.length) {
-  const ignored = parts.slice(usedPartCount).map(({ name }) => name).join(', ');
-  console.warn(`Ignored trailing legacy payload parts after the complete gzip stream: ${ignored}`);
+const firstInspection = inspectOrder([0]);
+if (firstInspection.status !== 'incomplete') {
+  throw new Error(`legacy-v15.part-00.txt is not a valid beginning of the gzip stream: ${firstInspection.reason}`);
 }
 
+const recovered = recoverOrder(
+  [0],
+  parts.slice(1).map(({ index }) => index),
+);
+
+if (!recovered) {
+  throw new Error(
+    `Could not recover a complete legacy WEB BOQ gzip stream from ${parts.length} parts after ${attempts} attempts`,
+  );
+}
+
+await writeFile(outputPath, `${recovered.encoded}\n`, 'utf8');
+
+const orderedNames = recovered.order.map((index) => parts[index].name);
+const unusedNames = parts
+  .filter(({ index }) => !recovered.order.includes(index))
+  .map(({ name }) => name);
+
+console.log(`Legacy WEB BOQ recovered order: ${orderedNames.join(' -> ')}`);
+if (unusedNames.length > 0) {
+  console.warn(`Unused legacy payload parts: ${unusedNames.join(', ')}`);
+}
 console.log(
-  `Legacy WEB BOQ assembled from ${usedPartCount}/${parts.length} parts: ${selectedEncoded.length.toLocaleString()} base64 characters, ${html.length.toLocaleString()} HTML characters`,
+  `Legacy WEB BOQ assembled: ${recovered.encoded.length.toLocaleString()} base64 characters, ${recovered.html.length.toLocaleString()} HTML characters, ${attempts} search attempts`,
 );
