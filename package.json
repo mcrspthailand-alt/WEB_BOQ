@@ -5,9 +5,9 @@
   "scripts": {
     "assemble:legacy": "node scripts/assemble-legacy.mjs",
     "dev": "npm run assemble:legacy && next dev",
-    "verify:legacy": "node scripts/verify-legacy.mjs",
+    "verify:legacy": "npm run assemble:legacy && node scripts/verify-legacy.mjs",
     "typecheck": "tsc --noEmit",
-    "build": "npm run assemble:legacy && npm run verify:legacy && next build",
+    "build": "npm run verify:legacy && next build",
     "start": "next start"
   },
   "dependencies": {
