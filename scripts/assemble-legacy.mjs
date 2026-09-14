@@ -46,6 +46,7 @@ for (let index = 0; index < chunks.length; index += 1) {
   encoded += chunks[index];
 
   if (encoded.length % 4 !== 0) {
+    console.warn(`prefix 00-${String(index).padStart(2, '0')}: skipped because base64 length is not divisible by 4`);
     continue;
   }
 
@@ -67,8 +68,15 @@ for (let index = 0; index < chunks.length; index += 1) {
       usedPartCount = index + 1;
       break;
     }
+
+    console.warn(
+      `prefix 00-${String(index).padStart(2, '0')}: gzip decoded but required WEB BOQ markers were not all present`,
+    );
   } catch (error) {
     lastError = error;
+    const code = error && typeof error === 'object' && 'code' in error ? error.code : 'UNKNOWN';
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`prefix 00-${String(index).padStart(2, '0')}: ${code} ${message}`);
   }
 }
 
