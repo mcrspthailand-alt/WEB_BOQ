@@ -18,8 +18,6 @@ jobs:
           node-version: 22
       - name: Install dependencies
         run: npm install
-      - name: Diagnose legacy WEB BOQ chunks
-        run: node scripts/diagnose-legacy.mjs
       - name: Verify legacy WEB BOQ payload
         run: npm run verify:legacy
       - name: Typecheck
