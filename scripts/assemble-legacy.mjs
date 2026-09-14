@@ -28,22 +28,30 @@ for (let index = 0; index < parts.length; index += 1) {
   }
 }
 
-const chunks = await Promise.all(
+const encodedChunks = await Promise.all(
   parts.map(async ({ name }) => (await readFile(path.join(publicDir, name), 'utf8')).trim()),
 );
 
-for (const [index, chunk] of chunks.entries()) {
+const binaryChunks = encodedChunks.map((chunk, index) => {
   if (!/^[A-Za-z0-9+/]*={0,2}$/.test(chunk)) {
     throw new Error(`Legacy WEB BOQ payload part contains invalid base64 characters: ${parts[index].name}`);
   }
   if (chunk.length % 4 !== 0) {
     throw new Error(`Legacy WEB BOQ payload part is not aligned to a base64 boundary: ${parts[index].name}`);
   }
-}
+
+  const decoded = Buffer.from(chunk, 'base64');
+  if (decoded.length === 0) {
+    throw new Error(`Legacy WEB BOQ payload part decoded to zero bytes: ${parts[index].name}`);
+  }
+  return decoded;
+});
 
 function inspectOrder(order) {
-  const encoded = order.map((index) => chunks[index]).join('');
-  const compressed = Buffer.from(encoded, 'base64');
+  // IMPORTANT: every part was base64-encoded independently. Decode each part
+  // first, then concatenate the binary gzip bytes. Concatenating the base64
+  // strings directly is invalid when intermediate chunks contain '=' padding.
+  const compressed = Buffer.concat(order.map((index) => binaryChunks[index]));
 
   if (compressed[0] !== 0x1f || compressed[1] !== 0x8b) {
     return { status: 'invalid', reason: 'missing gzip header' };
@@ -57,7 +65,7 @@ function inspectOrder(order) {
       html.includes('syncGeneratedBoq');
 
     return valid
-      ? { status: 'complete', html, encoded }
+      ? { status: 'complete', html, compressed }
       : { status: 'invalid', reason: 'gzip completed without required WEB BOQ markers' };
   } catch (error) {
     const code = error && typeof error === 'object' && 'code' in error ? error.code : 'UNKNOWN';
@@ -70,6 +78,11 @@ function inspectOrder(order) {
     return { status: 'invalid', reason: `${code} ${message}` };
   }
 }
+
+// The files are named with their intended order, so try the deterministic
+// natural order first. Recovery search is only a fallback for historical data.
+const naturalOrder = parts.map(({ index }) => index);
+const naturalInspection = inspectOrder(naturalOrder);
 
 let attempts = 0;
 const memo = new Set();
@@ -122,15 +135,28 @@ function recoverOrder(order, remaining) {
   return null;
 }
 
-const firstInspection = inspectOrder([0]);
-if (firstInspection.status !== 'incomplete') {
-  throw new Error(`legacy-v15.part-00.txt is not a valid beginning of the gzip stream: ${firstInspection.reason}`);
-}
+let recovered;
 
-const recovered = recoverOrder(
-  [0],
-  parts.slice(1).map(({ index }) => index),
-);
+if (naturalInspection.status === 'complete') {
+  recovered = { order: naturalOrder, ...naturalInspection };
+  console.log('Legacy WEB BOQ natural part order is valid.');
+} else {
+  console.warn(
+    `Natural legacy part order is ${naturalInspection.status}: ${naturalInspection.reason}. Trying recovery search...`,
+  );
+
+  const firstInspection = inspectOrder([0]);
+  if (firstInspection.status !== 'incomplete') {
+    throw new Error(
+      `legacy-v15.part-00.txt is not a valid beginning of the gzip stream: ${firstInspection.reason}`,
+    );
+  }
+
+  recovered = recoverOrder(
+    [0],
+    parts.slice(1).map(({ index }) => index),
+  );
+}
 
 if (!recovered) {
   throw new Error(
@@ -138,7 +164,8 @@ if (!recovered) {
   );
 }
 
-await writeFile(outputPath, `${recovered.encoded}\n`, 'utf8');
+const encoded = recovered.compressed.toString('base64');
+await writeFile(outputPath, `${encoded}\n`, 'utf8');
 
 const orderedNames = recovered.order.map((index) => parts[index].name);
 const unusedNames = parts
@@ -150,5 +177,5 @@ if (unusedNames.length > 0) {
   console.warn(`Unused legacy payload parts: ${unusedNames.join(', ')}`);
 }
 console.log(
-  `Legacy WEB BOQ assembled: ${recovered.encoded.length.toLocaleString()} base64 characters, ${recovered.html.length.toLocaleString()} HTML characters, ${attempts} search attempts`,
+  `Legacy WEB BOQ assembled: ${encoded.length.toLocaleString()} base64 characters, ${recovered.html.length.toLocaleString()} HTML characters, ${attempts} search attempts`,
 );
