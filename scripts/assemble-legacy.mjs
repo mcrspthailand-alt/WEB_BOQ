@@ -30,40 +30,61 @@ for (let index = 0; index < parts.length; index += 1) {
 const chunks = await Promise.all(
   parts.map(async ({ name }) => (await readFile(path.join(publicDir, name), 'utf8')).trim()),
 );
-const encoded = chunks.join('');
 
-if (!/^[A-Za-z0-9+/]*={0,2}$/.test(encoded) || encoded.length % 4 !== 0) {
-  throw new Error('Legacy WEB BOQ payload parts do not form valid base64 data');
+for (const [index, chunk] of chunks.entries()) {
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(chunk)) {
+    throw new Error(`Legacy WEB BOQ payload part contains invalid base64 characters: ${parts[index].name}`);
+  }
 }
 
-const compressed = Buffer.from(encoded, 'base64');
-if (compressed[0] !== 0x1f || compressed[1] !== 0x8b) {
-  throw new Error('Legacy WEB BOQ payload does not have a valid gzip header');
+let encoded = '';
+let html = null;
+let usedPartCount = 0;
+let lastError = null;
+
+for (let index = 0; index < chunks.length; index += 1) {
+  encoded += chunks[index];
+
+  if (encoded.length % 4 !== 0) {
+    continue;
+  }
+
+  const compressed = Buffer.from(encoded, 'base64');
+
+  if (index === 0 && (compressed[0] !== 0x1f || compressed[1] !== 0x8b)) {
+    throw new Error('Legacy WEB BOQ payload does not have a valid gzip header');
+  }
+
+  try {
+    const candidate = gunzipSync(compressed).toString('utf8');
+
+    if (
+      candidate.startsWith('<!doctype html>') &&
+      candidate.includes('WEB BOQ • v15') &&
+      candidate.includes('syncGeneratedBoq')
+    ) {
+      html = candidate;
+      usedPartCount = index + 1;
+      break;
+    }
+  } catch (error) {
+    lastError = error;
+  }
 }
 
-let html;
-try {
-  html = gunzipSync(compressed).toString('utf8');
-} catch (error) {
-  throw new Error(`Legacy WEB BOQ payload cannot be decompressed: ${error.message}`, {
-    cause: error,
-  });
+if (html === null) {
+  const suffix = lastError instanceof Error ? `: ${lastError.message}` : '';
+  throw new Error(`No complete legacy WEB BOQ gzip payload could be reconstructed from the available parts${suffix}`);
 }
 
-if (!html.startsWith('<!doctype html>')) {
-  throw new Error('Legacy WEB BOQ payload is not a valid HTML document');
-}
+const selectedEncoded = chunks.slice(0, usedPartCount).join('');
+await writeFile(outputPath, `${selectedEncoded}\n`, 'utf8');
 
-if (!html.includes('WEB BOQ • v15')) {
-  throw new Error('Legacy WEB BOQ payload is not v15');
+if (usedPartCount < parts.length) {
+  const ignored = parts.slice(usedPartCount).map(({ name }) => name).join(', ');
+  console.warn(`Ignored trailing legacy payload parts after the complete gzip stream: ${ignored}`);
 }
-
-if (!html.includes('syncGeneratedBoq')) {
-  throw new Error('Legacy WEB BOQ payload is missing v15 BOQ synchronization logic');
-}
-
-await writeFile(outputPath, `${encoded}\n`, 'utf8');
 
 console.log(
-  `Legacy WEB BOQ assembled from ${parts.length} parts: ${encoded.length.toLocaleString()} base64 characters, ${html.length.toLocaleString()} HTML characters`,
+  `Legacy WEB BOQ assembled from ${usedPartCount}/${parts.length} parts: ${selectedEncoded.length.toLocaleString()} base64 characters, ${html.length.toLocaleString()} HTML characters`,
 );
