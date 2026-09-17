@@ -12,15 +12,41 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 22
+
       - name: Install dependencies
         run: npm install
+
       - name: Verify legacy WEB BOQ payload
         run: npm run verify:legacy
+
       - name: Typecheck
         run: npm run typecheck
+
       - name: Build Next.js
         run: npm run build
+
+      - name: Build Docker image
+        run: docker build -t web-boq-ci .
+
+      - name: Smoke test Docker container
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name web-boq-ci -p 3000:3000 web-boq-ci
+          trap 'docker logs web-boq-ci || true; docker rm -f web-boq-ci || true' EXIT
+
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:3000/api/health >/tmp/web-boq-health.json; then
+              cat /tmp/web-boq-health.json
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo 'Container did not become healthy in time.' >&2
+          exit 1
