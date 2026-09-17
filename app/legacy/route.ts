@@ -5,15 +5,18 @@ import { gunzipSync } from 'node:zlib';
 export const runtime = 'nodejs';
 
 function patchLegacyHtml(source: string) {
-  const broken = `  function populateSectionOptions(){\n    const ci=n($('newCategory').value); const cat=state.categories[ci];\n    $('newSection').innerHTML=(cat?.sections||[]).map((s,i)=>\`<option value="${i}">${escapeHtml(s.code)} ${escapeHtml(s.name)}</option>\`).join('');\n    if($('catalogMajor')) populateCatalogMajors();\n  }`;
+  const pattern = /(function populateSectionOptions\(\)\{[\s\S]*?)(\n    if\(\$\('catalogMajor'\)\) populateCatalogMajors\(\);)(\n  \}\n  function renderSummary\(\)\{)/;
 
-  const fixed = `  function populateSectionOptions(){\n    const ci=n($('newCategory').value); const cat=state.categories[ci];\n    $('newSection').innerHTML=(cat?.sections||[]).map((s,i)=>\`<option value="${i}">${escapeHtml(s.code)} ${escapeHtml(s.name)}</option>\`).join('');\n  }`;
-
-  if (!source.includes(broken)) {
+  if (!pattern.test(source)) {
     throw new Error('WEB BOQ runtime patch target for populateSectionOptions was not found');
   }
 
-  return source.replace(broken, fixed);
+  // v15 had a recursive loop:
+  // populateCatalogMajors -> applyCatalogSelection -> alignBoqTargetToCatalog
+  // -> populateSectionOptions -> populateCatalogMajors -> ...
+  // Removing this one implicit refresh is safe because every explicit category
+  // change/open action already calls populateCatalogMajors separately.
+  return source.replace(pattern, '$1$3');
 }
 
 export async function GET() {
