@@ -40,13 +40,24 @@ jobs:
           docker run -d --name web-boq-ci -p 3000:3000 web-boq-ci
           trap 'docker logs web-boq-ci || true; docker rm -f web-boq-ci || true' EXIT
 
+          healthy=0
           for i in {1..30}; do
             if curl -fsS http://127.0.0.1:3000/api/health >/tmp/web-boq-health.json; then
-              cat /tmp/web-boq-health.json
-              exit 0
+              healthy=1
+              break
             fi
             sleep 2
           done
 
-          echo 'Container did not become healthy in time.' >&2
-          exit 1
+          if [ "$healthy" -ne 1 ]; then
+            echo 'Container did not become healthy in time.' >&2
+            exit 1
+          fi
+
+          cat /tmp/web-boq-health.json
+
+          # Exercise the real WEB BOQ route too. This fails if the runtime
+          # Add Item patch cannot find/apply its target or if /legacy crashes.
+          curl -fsS -D /tmp/web-boq-legacy.headers http://127.0.0.1:3000/legacy -o /tmp/web-boq-legacy.html
+          grep -Fq 'X-WEB-BOQ-Version: v15-nextjs-add-item-fix' /tmp/web-boq-legacy.headers
+          grep -Fq 'WEB BOQ' /tmp/web-boq-legacy.html
