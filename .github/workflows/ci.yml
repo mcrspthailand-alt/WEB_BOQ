@@ -56,8 +56,21 @@ jobs:
 
           cat /tmp/web-boq-health.json
 
+          legacy=0
+          for i in {1..20}; do
+            if curl -fsS -D /tmp/web-boq-legacy.headers http://127.0.0.1:3000/legacy -o /tmp/web-boq-legacy.html; then
+              legacy=1
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "$legacy" -ne 1 ]; then
+            echo 'Legacy WEB BOQ route did not become available in time.' >&2
+            exit 1
+          fi
+
           # Exercise the real WEB BOQ route too. This fails if the runtime
           # Add Item patch cannot find/apply its target or if /legacy crashes.
-          curl -fsS -D /tmp/web-boq-legacy.headers http://127.0.0.1:3000/legacy -o /tmp/web-boq-legacy.html
-          grep -Fq 'X-WEB-BOQ-Version: v15-nextjs-add-item-fix' /tmp/web-boq-legacy.headers
+          grep -Fiq 'x-web-boq-version: v15-nextjs-add-item-fix' /tmp/web-boq-legacy.headers
           grep -Fq 'WEB BOQ' /tmp/web-boq-legacy.html
